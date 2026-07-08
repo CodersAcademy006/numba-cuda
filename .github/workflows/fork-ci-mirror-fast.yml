@@ -1,0 +1,98 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: BSD-2-Clause
+
+# Fork-internal CI mirror: CPU-only checks for faster feedback
+# This workflow mirrors the upstream's pre-commit and documentation build checks.
+# GPU/CUDA-dependent tests remain an acknowledged gap and are not included.
+# See CI_MIRROR_GAPS.md for details.
+
+name: Fork CI Mirror (CPU-only)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  trigger-check:
+    # Only proceed if this is a PR and (event is PR or comment on PR contains /run-ci-mirror)
+    runs-on: ubuntu-latest
+    outputs:
+      should-run: ${{ steps.decide.outputs.should-run }}
+    steps:
+      - name: Decide whether to run
+        id: decide
+        run: |
+          should_run="false"
+          if ${{ github.event_name == 'pull_request' }}; then
+            should_run="true"
+          elif ${{ github.event_name == 'workflow_dispatch' }}; then
+            should_run="true"
+          elif ${{ github.event_name == 'issue_comment' && github.event.issue.pull_request != null }}; then
+            if [[ "${{ github.event.comment.body }}" == *"/run-ci-mirror"* ]]; then
+              should_run="true"
+            fi
+          fi
+          echo "should-run=${should_run}" >> $GITHUB_OUTPUT
+
+  pre-commit:
+    needs: trigger-check
+    if: ${{ needs.trigger-check.outputs.should-run == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548
+      - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd
+        with:
+          extra_args: --all-files --show-diff-on-failure
+
+  build-docs:
+    needs: trigger-check
+    if: ${{ needs.trigger-check.outputs.should-run == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup pixi
+        uses: prefix-dev/setup-pixi@fef5c9568ca6c4ff7707bf840ab0692ba3f08293
+        with:
+          pixi-version: "v0.61.0"
+          environments: docs
+          cache: false
+      - name: Docs build
+        run: pixi run -e docs build-docs
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Upload docs
+        if: "!cancelled()"
+        uses: actions/upload-artifact@v5
+        with:
+          name: docs
+          path: ${{ github.workspace }}/docs/build/html
+
+  checks:
+    name: Mirror CI Status
+    if: always()
+    runs-on: ubuntu-latest
+    needs:
+      - pre-commit
+      - build-docs
+    steps:
+      - name: Check mirror job status
+        run: |
+          if ${{ needs.pre-commit.result == 'failure' || needs.build-docs.result == 'failure' }}; then
+            echo "One or more mirror CI checks failed."
+            exit 1
+          elif ${{ needs.pre-commit.result == 'cancelled' || needs.build-docs.result == 'cancelled' }}; then
+            echo "One or more mirror CI checks were cancelled."
+            exit 1
+          else
+            echo "All mirror CI checks passed."
+            exit 0
+          fi
