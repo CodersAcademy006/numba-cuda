@@ -4,7 +4,7 @@
 import numpy as np
 
 from numba import cuda
-from numba.cuda import complex64, int32, float64
+from numba.cuda import complex64, int32, float32, float64
 from numba.cuda.testing import unittest, CUDATestCase
 from numba.cuda.core.config import ENABLE_CUDASIM
 
@@ -29,6 +29,18 @@ CONST_RECORD_ALIGN = np.array(
         align=True,
     ),
 )
+
+
+# A record whose itemsize is far larger than its field alignment: 64 float32
+# fields give an itemsize of 256 bytes and an ABI alignment of 4.
+CONST_RECORD_BIG = np.zeros(
+    1, dtype=np.dtype([(f"f{i}", np.float32) for i in range(64)])
+)
+
+
+def cuconstRecBig(A):
+    C = cuda.const.array_like(CONST_RECORD_BIG)
+    A[0] = C[0]["f0"]
 
 
 def cuconstEmpty(A):
@@ -172,6 +184,24 @@ class TestCudaConstantMemory(CUDATestCase):
         np.testing.assert_allclose(C, CONST_RECORD_ALIGN["x"])
         np.testing.assert_allclose(D, CONST_RECORD_ALIGN["y"])
         np.testing.assert_allclose(E, CONST_RECORD_ALIGN["z"])
+
+
+    def test_const_record_align_is_abi_not_size(self):
+        # The alignment of the constant global came from the ABI *size* of the
+        # record rounded up to a power of two, so this 256-byte record asked for
+        # ".align 256" instead of its 4-byte field alignment. See #918.
+        sig = (float32[:],)
+        jcuconst = cuda.jit(sig)(cuconstRecBig)
+        A = np.full(1, fill_value=np.nan, dtype=np.float32)
+        jcuconst[1, 1](A)
+        np.testing.assert_allclose(A, CONST_RECORD_BIG[0]["f0"])
+
+        if not ENABLE_CUDASIM:
+            self.assertRegex(
+                jcuconst.inspect_asm(sig),
+                r"\.const\s+\.align\s+4\s+\.b8\s+_cudapy_cmem",
+                "constant array aligned to the record's ABI alignment",
+            )
 
 
 if __name__ == "__main__":

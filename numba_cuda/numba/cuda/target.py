@@ -312,7 +312,7 @@ class CUDATargetContext(BaseContext):
 
         # Preserve the underlying alignment
         lldtype = self.get_data_type(aryty.dtype)
-        align = self.get_abi_sizeof(lldtype)
+        align = self.get_abi_alignment(lldtype)
         gv.align = 2 ** (align - 1).bit_length()
 
         # Convert to generic address-space
